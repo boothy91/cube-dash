@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Cube Dash</title>
+<style>
+  :root { --bg:#10131f; --fg:#f2f4ff; --accent:#ffd23f; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; user-select:none; touch-action:manipulation; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg); font-family:"Trebuchet MS",Verdana,sans-serif; overflow:hidden; }
+  #wrap { position:relative; width:100%; height:100%; display:flex; align-items:center; justify-content:center; }
+  #box { position:relative; width:min(100vw, 200vh); aspect-ratio:2/1; }
+  canvas { width:100%; height:100%; display:block; border-radius:6px; }
+  #ui { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2vmin; background:rgba(8,10,20,.78); text-align:center; }
+  #ui.hide { display:none; }
+  h1 { margin:0; font-size:clamp(28px,7vmin,64px); letter-spacing:.02em; }
+  p { margin:0; font-size:clamp(13px,2.6vmin,20px); opacity:.85; }
+  .row { display:flex; gap:2vmin; flex-wrap:wrap; justify-content:center; }
+  button { font:inherit; font-weight:700; font-size:clamp(14px,3vmin,24px); padding:1.6vmin 3vmin; border:3px solid var(--fg); border-radius:10px; background:transparent; color:var(--fg); cursor:pointer; min-width:22vmin; }
+  button:hover,button:focus-visible { background:var(--accent); color:#10131f; border-color:var(--accent); outline:none; }
+  button small { display:block; font-weight:400; font-size:.65em; opacity:.8; }
+</style>
+</head>
+<body>
+<div id="wrap"><div id="box">
+  <canvas id="c" width="800" height="400"></canvas>
+  <div id="ui">
+    <h1 id="t">Cube Dash</h1>
+    <p id="m">Tap the screen or press space to jump. Hold to keep jumping.</p>
+    <div class="row" id="btns"></div>
+  </div>
+</div></div>
+<script>
+(function () {
+  var cv = document.getElementById('c'), ctx = cv.getContext('2d');
+  var ui = document.getElementById('ui'), tEl = document.getElementById('t'), mEl = document.getElementById('m'), bEl = document.getElementById('btns');
+  var W = 800, H = 400, GY = 320, U = 40, PX = 150;
+
+  // Level items: ['s', x, count, baseHeight] spikes; ['b', x, width, height] blocks (grid units)
+  var LEVELS = [
+    { name:'Sunrise Run', speed:300, end:95, top:'#ff9a5a', bot:'#ffd98a', ground:'#7a3b2e', accent:'#fff3c4',
+      o:[['s',12],['s',20],['s',27,2],['b',34,3,1],['s',42],['s',48,2],['b',55,2,2],['s',62],['b',68,4,1],['s',70,1,1],['s',78,2],['s',85]] },
+    { name:'Neon Steps', speed:340, end:108, top:'#1b1464', bot:'#6b2fa8', ground:'#0d0a33', accent:'#5cf2ff',
+      o:[['s',12,3],['s',22,2],['b',30,3,1],['b',33,3,2],['s',41],['s',47,3],['s',56,4],['b',66,3,1],['s',67,1,1],['s',76,2],['s',82,2],['s',88,3],['b',96,2,2],['s',99]] },
+    { name:'Red Zone', speed:400, end:118, top:'#1a0505', bot:'#7a0f1f', ground:'#2a0509', accent:'#ff5a4d',
+      o:[['s',14,2],['s',21],['s',26,3],['b',34,2,1],['s',37],['b',42,1,2],['s',49,2],['s',53,2],['s',59,4],['b',69,3,1],['s',70,1,1],['b',77,2,2],['s',81,2],['s',88,2],['s',92,2],['s',97,3],['b',106,2,1],['s',108,2]] }
+  ];
+  var best = {};
+  try { best = JSON.parse(localStorage.getItem('cubedash') || '{}'); } catch (e) {}
+  function saveBest() { try { localStorage.setItem('cubedash', JSON.stringify(best)); } catch (e) {} }
+
+  var lv, spikes, blocks, st = 'menu', cur = 0, d, y, vy, rot, ground, held = false, attempts = 0, deadT = 0, parts = [];
+  var G = 2600, JV = 780;
+
+  function load(i) {
+    cur = i; lv = LEVELS[i]; spikes = []; blocks = [];
+    lv.o.forEach(function (it) {
+      if (it[0] === 's') { var n = it[2] || 1, base = it[3] || 0; for (var k = 0; k < n; k++) spikes.push({ x:(it[1] + k) * U, y:base * U }); }
+      else blocks.push({ x:it[1] * U, w:it[2] * U, h:it[3] * U });
+    });
+    attempts = 0; restart();
+  }
+  function restart() { d = 0; y = 0; vy = 0; rot = 0; ground = true; parts = []; attempts++; st = 'play'; ui.classList.add('hide'); }
+
+  function menu(title, msg) {
+    st = 'menu'; tEl.textContent = title; mEl.textContent = msg; bEl.innerHTML = '';
+    LEVELS.forEach(function (L, i) {
+      var b = document.createElement('button');
+      b.innerHTML = (i + 1) + '. ' + L.name + '<small>Best ' + (best[i] || 0) + '%</small>';
+      b.addEventListener('click', function (e) { e.stopPropagation(); load(i); });
+      b.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+      bEl.appendChild(b);
+    });
+    ui.classList.remove('hide');
+  }
+
+  function die() {
+    st = 'dead'; deadT = 0.7;
+    var pct = Math.min(99, Math.floor(d / (lv.end * U) * 100));
+    if (pct > (best[cur] || 0)) { best[cur] = pct; saveBest(); }
+    for (var i = 0; i < 24; i++) parts.push({ x:d + 20, y:y + 20, vx:(Math.random() - .5) * 500, vy:Math.random() * 500, l:1 });
+  }
+  function win() { st = 'win'; best[cur] = 100; saveBest(); setTimeout(function () { menu('Level complete!', LEVELS[cur].name + ' cleared in ' + attempts + (attempts === 1 ? ' attempt.' : ' attempts.')); }, 500); }
+
+  function hit(ax, ay, aw, ah, bx, by, bw, bh) { return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by; }
+
+  function step(dt) {
+    if (st === 'dead') { deadT -= dt; parts.forEach(function (p) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy -= 1500 * dt; p.l -= dt; }); if (deadT <= 0) restart(); return; }
+    if (st !== 'play') return;
+    if (held && ground) { vy = JV; ground = false; }
+    var py = y; vy -= G * dt; y += vy * dt; d += lv.speed * dt;
+    ground = false;
+    if (y <= 0) { y = 0; vy = 0; ground = true; }
+    for (var i = 0; i < blocks.length; i++) {
+      var b = blocks[i];
+      if (d + 38 > b.x && d + 2 < b.x + b.w) {
+        if (py >= b.h - 4 && y <= b.h && vy <= 0) { y = b.h; vy = 0; ground = true; }
+        else if (y < b.h - 2 && y + 38 > 0) { die(); return; }
+      }
+    }
+    for (var j = 0; j < spikes.length; j++) {
+      var s = spikes[j];
+      if (hit(d + 5, y + 5, 30, 30, s.x + 11, s.y, 18, 24)) { die(); return; }
+    }
+    if (ground) rot = Math.round(rot / (Math.PI / 2)) * (Math.PI / 2); else rot += 7.5 * dt;
+    if (d >= lv.end * U) win();
+  }
+
+  function draw() {
+    var g = ctx.createLinearGradient(0, 0, 0, GY); g.addColorStop(0, lv ? lv.top : '#10131f'); g.addColorStop(1, lv ? lv.bot : '#2a2f55');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    if (!lv) return;
+    var cam = d - PX;
+    ctx.fillStyle = 'rgba(255,255,255,.07)';
+    for (var i = -1; i < 8; i++) { var bx = ((i * 140 - cam * .3) % 1120 + 1120) % 1120 - 140; ctx.fillRect(bx, GY - 60 - (i % 3) * 50, 90, 400); }
+    ctx.fillStyle = lv.ground; ctx.fillRect(0, GY, W, H - GY);
+    ctx.fillStyle = lv.accent; ctx.fillRect(0, GY, W, 3);
+    var ex = lv.end * U - cam; ctx.fillStyle = lv.accent; ctx.fillRect(ex, 0, 6, GY);
+    blocks.forEach(function (b) {
+      var sx = b.x - cam; if (sx > W || sx + b.w < 0) return;
+      ctx.fillStyle = lv.ground; ctx.fillRect(sx, GY - b.h, b.w, b.h);
+      ctx.strokeStyle = lv.accent; ctx.lineWidth = 2; ctx.strokeRect(sx + 1, GY - b.h + 1, b.w - 2, b.h - 2);
+    });
+    ctx.fillStyle = '#111'; ctx.strokeStyle = lv.accent; ctx.lineWidth = 2;
+    spikes.forEach(function (s) {
+      var sx = s.x - cam; if (sx > W || sx < -U) return;
+      var by = GY - s.y;
+      ctx.beginPath(); ctx.moveTo(sx, by); ctx.lineTo(sx + U, by); ctx.lineTo(sx + U / 2, by - U); ctx.closePath(); ctx.fill(); ctx.stroke();
+    });
+    if (st === 'dead') {
+      parts.forEach(function (p) { if (p.l > 0) { ctx.fillStyle = lv.accent; ctx.fillRect(p.x - cam, GY - p.y, 8, 8); } });
+    } else {
+      ctx.save(); ctx.translate(PX + 20, GY - y - 20); ctx.rotate(rot);
+      ctx.fillStyle = '#ffd23f'; ctx.fillRect(-20, -20, 40, 40);
+      ctx.strokeStyle = '#111'; ctx.lineWidth = 3; ctx.strokeRect(-20, -20, 40, 40);
+      ctx.fillStyle = '#111'; ctx.fillRect(-10, -10, 8, 10); ctx.fillRect(4, -10, 8, 10); ctx.fillRect(-10, 8, 22, 4);
+      ctx.restore();
+    }
+    var pct = Math.min(100, d / (lv.end * U) * 100);
+    ctx.fillStyle = 'rgba(0,0,0,.4)'; ctx.fillRect(200, 14, 400, 10);
+    ctx.fillStyle = lv.accent; ctx.fillRect(200, 14, 4 * pct, 10);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 16px Verdana'; ctx.textAlign = 'center';
+    ctx.fillText(Math.floor(pct) + '%', 400, 44);
+    ctx.textAlign = 'left'; ctx.fillText('Attempt ' + attempts, 14, 26);
+  }
+
+  var last = 0;
+  function loop(t) {
+    var dt = Math.min(0.05, (t - last) / 1000 || 0); last = t;
+    step(dt / 2); step(dt / 2); draw(); requestAnimationFrame(loop);
+  }
+
+  function down() { held = true; }
+  function up() { held = false; }
+  window.addEventListener('keydown', function (e) {
+    if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') { e.preventDefault(); down(); }
+    else if (e.code === 'Escape' && st === 'play') menu('Paused', 'Pick a level to start over.');
+  });
+  window.addEventListener('keyup', function (e) { if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') up(); });
+  document.getElementById('box').addEventListener('pointerdown', function () { if (st === 'play') down(); });
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+  window.addEventListener('blur', up);
+
+  menu('Cube Dash', 'Tap the screen or press space to jump. Hold to keep jumping.');
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
